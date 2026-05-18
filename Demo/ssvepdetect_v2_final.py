@@ -1,14 +1,12 @@
 import numpy as np
 from scipy import signal as scipysignal
 from sklearn.cross_decomposition import CCA
-import pickle
 
 
 class ssvepDetect:
     """
     SSVEP检测器 - FBCCA + 数据模板
     - 支持多数据集合并训练
-    - 支持从模型文件加载预训练模板
     - 3次谐波参考信号
     - 5个子频带
     - 通道归一化
@@ -22,29 +20,6 @@ class ssvepDetect:
         self._build_reference_templates()
         self._build_subband_filters()
         self.data_templates = None  # 数据模板
-    
-    def load_model(self, model_path='model.pkl'):
-        """
-        从文件加载预训练模型
-        
-        参数:
-            model_path: 模型文件路径
-        返回:
-            是否加载成功
-        """
-        try:
-            with open(model_path, 'rb') as f:
-                model_data = pickle.load(f)
-            
-            self.data_templates = model_data['data_templates']
-            print(f"成功加载模型: {model_path}")
-            return True
-        except FileNotFoundError:
-            print(f"模型文件不存在: {model_path}")
-            return False
-        except Exception as e:
-            print(f"加载模型失败: {e}")
-            return False
     
     def fit(self, X, y):
         """
@@ -136,7 +111,7 @@ class ssvepDetect:
                 weight = self.subband_weights[subband_idx]
                 fused_rho[freq_idx] += weight * abs(rho)
         
-        # 加上数据模板匹配分数（如果有训练过或加载过）
+        # 加上数据模板匹配分数（如果有训练过）
         if self.data_templates is not None:
             template_scores = np.zeros(n_freqs)
             for freq_idx, template in enumerate(self.data_templates):

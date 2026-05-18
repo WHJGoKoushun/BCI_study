@@ -1,16 +1,14 @@
 import numpy as np
 from scipy import signal as scipysignal
 from sklearn.cross_decomposition import CCA
-import pickle
 
 
 class ssvepDetect:
     """
-    SSVEP检测器 - FBCCA + 数据模板
-    - 支持多数据集合并训练
-    - 支持从模型文件加载预训练模板
-    - 3次谐波参考信号
+    SSVEP检测器 - 纯FBCCA版本（无数据模板）
+    - 原始93.75%准确率版本
     - 5个子频带
+    - 3次谐波
     - 通道归一化
     """
     
@@ -21,59 +19,12 @@ class ssvepDetect:
         self.cca = CCA(n_components=1)
         self._build_reference_templates()
         self._build_subband_filters()
-        self.data_templates = None  # 数据模板
-    
-    def load_model(self, model_path='model.pkl'):
-        """
-        从文件加载预训练模型
-        
-        参数:
-            model_path: 模型文件路径
-        返回:
-            是否加载成功
-        """
-        try:
-            with open(model_path, 'rb') as f:
-                model_data = pickle.load(f)
-            
-            self.data_templates = model_data['data_templates']
-            print(f"成功加载模型: {model_path}")
-            return True
-        except FileNotFoundError:
-            print(f"模型文件不存在: {model_path}")
-            return False
-        except Exception as e:
-            print(f"加载模型失败: {e}")
-            return False
-    
-    def fit(self, X, y):
-        """
-        从训练数据构建模板
-        支持多数据集合并训练，例如：
-        - X: 合并D1+D2的数据 (96, 6, 1000)
-        - y: 对应的标签 (96,)
-        
-        参数:
-            X: (n_epochs, channels, samples) 训练数据
-            y: (n_epochs,) 标签
-        """
-        n_freqs = len(self.freqs)
-        self.data_templates = []
-        
-        for freq_idx in range(n_freqs):
-            mask = y == freq_idx
-            if mask.sum() > 0:
-                # 计算该频率的平均模板
-                template = X[mask].mean(axis=0)
-                self.data_templates.append(template)
-            else:
-                self.data_templates.append(None)
     
     def _build_reference_templates(self):
-        """构建正弦参考信号模板（含3次谐波）"""
+        """构建含谐波的参考信号模板（基频+2次+3次谐波）"""
         templLen = int(self.dataLen * self.srate)
         sample = np.linspace(0, (templLen - 1) / self.srate, templLen, endpoint=True)
-        self.sine_templates = []
+        self.TemplateSet = []
         
         for freq in self.freqs:
             ref_signals = []
@@ -82,7 +33,7 @@ class ssvepDetect:
                 ref_signals.append(np.sin(omega))
                 ref_signals.append(np.cos(omega))
             tempset = np.vstack(ref_signals)
-            self.sine_templates.append(tempset)
+            self.TemplateSet.append(tempset)
     
     def _build_subband_filters(self):
         """构建5个FBCCA子频带滤波器"""
@@ -107,27 +58,18 @@ class ssvepDetect:
         return (data - mean) / std
     
     def detect(self, data):
-        """
-        检测SSVEP频率
-        
-        参数:
-            data: (channels, samples) 输入数据
-        返回:
-            预测的频率索引
-        """
-        # 预处理
+        """FBCCA检测"""
         data = self.pre_filter(data)
         data = self._normalize_channels(data)
         
         n_freqs = len(self.freqs)
         fused_rho = np.zeros(n_freqs)
         
-        # FBCCA分数
         for subband_idx, (b, a) in enumerate(self.subband_filters):
             filtered_data = scipysignal.filtfilt(b, a, data, axis=1)
             cdata = filtered_data.transpose()
             
-            for freq_idx, template in enumerate(self.sine_templates):
+            for freq_idx, template in enumerate(self.TemplateSet):
                 ctemplate = template.transpose()
                 self.cca.fit(cdata, ctemplate)
                 datatran, templatetran = self.cca.transform(cdata, ctemplate)
@@ -136,32 +78,16 @@ class ssvepDetect:
                 weight = self.subband_weights[subband_idx]
                 fused_rho[freq_idx] += weight * abs(rho)
         
-        # 加上数据模板匹配分数（如果有训练过或加载过）
-        if self.data_templates is not None:
-            template_scores = np.zeros(n_freqs)
-            for freq_idx, template in enumerate(self.data_templates):
-                if template is not None:
-                    template_norm = self._normalize_channels(template)
-                    corr = np.corrcoef(data.flatten(), template_norm.flatten())[0, 1]
-                    template_scores[freq_idx] = abs(corr)
-            
-            # 融合：FBCCA占70%，模板占30%
-            fused_rho = 0.7 * fused_rho + 0.3 * template_scores
-        
         return int(np.argmax(fused_rho))
     
     def pre_filter(self, data):
-        """
-        预处理滤波: 50Hz陷波 + 6-90Hz带通
-        """
+        """预处理滤波: 50Hz陷波 + 6-90Hz带通"""
         if data.ndim == 1:
             data = data.reshape(1, -1)
         
-        # 50Hz陷波
         b_notch, a_notch = scipysignal.iircomb(50, 35, ftype='notch', fs=self.srate)
         data_notched = scipysignal.filtfilt(b_notch, a_notch, data, axis=1)
         
-        # 6-90Hz带通
         nyq = self.srate / 2
         low, high = 6 / nyq, 90 / nyq
         b_bp, a_bp = scipysignal.butter(4, [low, high], btype='band')
